@@ -1,120 +1,118 @@
 """
-Capa de ejecucion sobre Bybit (pybit v5).
+Capa de ejecucion sobre Binance Futures (python-binance).
 
 Responsabilidades:
-  - Conectar al exchange correcto (testnet / mainnet)
-  - Consultar balance, posicion abierta, estado de ordenes
-  - Colocar orden limite con SL
-  - Cancelar ordenes pendientes
-  - Cerrar posicion con orden de mercado
-  - Obtener klines H1 (con fuente configurable)
+  - Conectar a Binance Futures (testnet o mainnet)
+  - Obtener klines H1, balance, posicion abierta
+  - Colocar orden limite BUY
+  - Colocar STOP_MARKET (SL) despues del fill
+  - Cancelar ordenes
+  - Cerrar posicion con market
 
-Bybit Testnet: https://testnet.bybit.com -> API Management
+Flujo de SL en Binance (diferente a Bybit):
+  - Binance no permite adjuntar SL a la orden limite en un solo call.
+  - Se coloca el SL (STOP_MARKET) una vez que la orden limite fue llenada.
+  - main.py llama a place_sl_order() inmediatamente despues de detectar el fill.
 """
 
 import time
 import math
-from pybit.unified_trading import HTTP
+from binance.client import Client
+from binance.exceptions import BinanceAPIException
 
-from config import (
-    SYMBOL, CATEGORY, INTERVAL, LEVERAGE,
-    API_KEY, API_SECRET, ORDER_TARGET, SIGNAL_SOURCE,
-    DRY_RUN, COMMISSION_PCT,
-)
+import config
+from config import SYMBOL, INTERVAL, LEVERAGE, TESTNET, API_KEY, API_SECRET
 
 
-# ── Sesiones HTTP ─────────────────────────────────────────────────────────────
+# ── Cliente ───────────────────────────────────────────────────────────────────
 
-def _make_session(target: str, auth: bool = False) -> HTTP:
-    is_testnet = (target == "testnet")
-    if auth:
-        return HTTP(testnet=is_testnet, api_key=API_KEY, api_secret=API_SECRET)
-    return HTTP(testnet=is_testnet)
+_client: Client | None = None
 
 
-# Sesion autenticada para ordenes (testnet)
-_order_session:  HTTP | None = None
-# Sesion publica para klines (mainnet — datos reales)
-_kline_session:  HTTP | None = None
+def init_client() -> None:
+    global _client
+    _client = Client(API_KEY, API_SECRET, testnet=TESTNET)
+    env = "TESTNET" if TESTNET else "MAINNET"
+    print(f"  [OK] Binance Futures {env} conectado")
 
 
-def init_sessions() -> None:
-    global _order_session, _kline_session
-    _order_session = _make_session(ORDER_TARGET, auth=True)
-    _kline_session = _make_session(SIGNAL_SOURCE, auth=False)
+def client() -> Client:
+    if _client is None:
+        raise RuntimeError("Cliente no inicializado. Llamar init_client() primero.")
+    return _client
 
 
-def order_session() -> HTTP:
-    if _order_session is None:
-        raise RuntimeError("Sesiones no inicializadas. Llamar init_sessions() primero.")
-    return _order_session
+# ── Info del instrumento ──────────────────────────────────────────────────────
 
+_info: dict | None = None
 
-def kline_session() -> HTTP:
-    if _kline_session is None:
-        raise RuntimeError("Sesiones no inicializadas.")
-    return _kline_session
-
-
-# ── Instrumento ───────────────────────────────────────────────────────────────
-
-_instrument: dict | None = None
 
 def get_instrument_info() -> dict:
-    global _instrument
-    if _instrument is not None:
-        return _instrument
-    resp = kline_session().get_instruments_info(category=CATEGORY, symbol=SYMBOL)
-    _check(resp, "get_instruments_info")
-    _instrument = resp["result"]["list"][0]
-    return _instrument
+    global _info
+    if _info is not None:
+        return _info
+    resp = client().futures_exchange_info()
+    sym  = next((s for s in resp["symbols"] if s["symbol"] == SYMBOL), None)
+    if sym is None:
+        raise RuntimeError(f"{SYMBOL} no encontrado en Binance Futures")
+    _info = sym
+    return _info
+
+
+def price_tick() -> float:
+    f = next(f for f in get_instrument_info()["filters"] if f["filterType"] == "PRICE_FILTER")
+    return float(f["tickSize"])
+
+
+def qty_step() -> float:
+    f = next(f for f in get_instrument_info()["filters"] if f["filterType"] == "LOT_SIZE")
+    return float(f["stepSize"])
 
 
 def min_qty() -> float:
-    return float(get_instrument_info()["lotSizeFilter"]["minOrderQty"])
+    f = next(f for f in get_instrument_info()["filters"] if f["filterType"] == "LOT_SIZE")
+    return float(f["minQty"])
 
-def qty_step() -> float:
-    return float(get_instrument_info()["lotSizeFilter"]["qtyStep"])
-
-def price_tick() -> float:
-    return float(get_instrument_info()["priceFilter"]["tickSize"])
 
 def round_price(p: float) -> float:
     tick = price_tick()
-    return round(round(p / tick) * tick, 10)
+    return round(round(p / tick) * tick, 8)
+
 
 def round_qty(q: float) -> float:
     step = qty_step()
     floored = math.floor(q / step) * step
-    return round(max(floored, min_qty()), 10)
+    return round(max(floored, min_qty()), 8)
 
 
-# ── Klines (señales) ──────────────────────────────────────────────────────────
+def _fmt_price(p: float) -> str:
+    tick = price_tick()
+    decimals = max(0, -int(math.floor(math.log10(tick)))) if tick < 1 else 0
+    return f"{round_price(p):.{decimals}f}"
+
+
+def _fmt_qty(q: float) -> str:
+    step = qty_step()
+    decimals = max(0, -int(math.floor(math.log10(step)))) if step < 1 else 0
+    return f"{round_qty(q):.{decimals}f}"
+
+
+# ── Klines ────────────────────────────────────────────────────────────────────
 
 def get_h1_candles(limit: int = 60) -> list[dict]:
     """
-    Obtiene las ultimas `limit` velas H1 cerradas desde la fuente de señales.
-    Retorna lista de dicts [{time, open, high, low, close, volume}, ...] ASC.
+    Obtiene las ultimas `limit` velas H1 cerradas desde Binance Futures.
+    Retorna lista de dicts [{time, open, high, low, close, volume}] ASC.
     """
-    resp = kline_session().get_kline(
-        category=CATEGORY,
-        symbol=SYMBOL,
-        interval=INTERVAL,
-        limit=limit + 1,   # +1 porque la ultima puede estar abierta
-    )
-    _check(resp, "get_kline")
-    rows = resp["result"]["list"]   # Bybit devuelve DESC (newest first)
+    raw = client().futures_klines(symbol=SYMBOL, interval=INTERVAL, limit=limit + 1)
 
-    # Descartar la vela mas reciente si aun esta abierta
     now_ms = int(time.time() * 1000)
     bars = []
-    for row in rows:
-        open_ms = int(row[0])
-        # La vela H1 cierra 3600000 ms despues de su apertura
-        close_ms = open_ms + 3_600_000
-        if close_ms <= now_ms:
+    for row in raw:
+        close_ms = int(row[6])   # Binance provee close_time directamente
+        if close_ms < now_ms:
             bars.append({
-                "time":   open_ms,
+                "time":   int(row[0]),
                 "open":   float(row[1]),
                 "high":   float(row[2]),
                 "low":    float(row[3]),
@@ -122,27 +120,22 @@ def get_h1_candles(limit: int = 60) -> list[dict]:
                 "volume": float(row[5]),
             })
 
-    bars.reverse()   # ASC cronologico
     return bars[-limit:]
 
 
 # ── Balance y posicion ────────────────────────────────────────────────────────
 
 def get_usdt_balance() -> float:
-    resp = order_session().get_wallet_balance(accountType="UNIFIED")
-    _check(resp, "get_wallet_balance")
-    for coin in resp["result"]["list"][0]["coin"]:
-        if coin["coin"] == "USDT":
-            return float(coin["walletBalance"])
+    for b in client().futures_account_balance():
+        if b["asset"] == "USDT":
+            return float(b["balance"])
     return 0.0
 
 
 def get_open_position() -> dict | None:
     """Retorna la posicion abierta en SYMBOL o None si no hay."""
-    resp = order_session().get_positions(category=CATEGORY, symbol=SYMBOL)
-    _check(resp, "get_positions")
-    for pos in resp["result"]["list"]:
-        if float(pos["size"]) > 0:
+    for pos in client().futures_position_information(symbol=SYMBOL):
+        if float(pos["positionAmt"]) != 0:
             return pos
     return None
 
@@ -150,10 +143,6 @@ def get_open_position() -> dict | None:
 # ── Calcular qty ──────────────────────────────────────────────────────────────
 
 def calc_qty(entry: float, sl: float, risk_usd: float) -> float:
-    """
-    Qty = risk_usd / SL_distance, redondeado al step del instrumento.
-    Minimo: min_qty().
-    """
     sl_dist = abs(entry - sl)
     if sl_dist <= 0:
         return 0.0
@@ -163,129 +152,127 @@ def calc_qty(entry: float, sl: float, risk_usd: float) -> float:
 # ── Ordenes ───────────────────────────────────────────────────────────────────
 
 def set_leverage() -> None:
-    if DRY_RUN:
+    if config.DRY_RUN:
         print(f"  [DRY] set_leverage {LEVERAGE}x")
         return
     try:
-        order_session().set_leverage(
-            category=CATEGORY,
-            symbol=SYMBOL,
-            buyLeverage=str(LEVERAGE),
-            sellLeverage=str(LEVERAGE),
-        )
-    except Exception:
-        pass  # ya estaba configurado
+        client().futures_change_leverage(symbol=SYMBOL, leverage=LEVERAGE)
+        print(f"  [OK] Leverage configurado: {LEVERAGE}x")
+    except BinanceAPIException as e:
+        if "No need to change leverage" in str(e):
+            print(f"  [OK] Leverage ya era {LEVERAGE}x")
+        else:
+            print(f"  [WARN] set_leverage: {e}")
 
 
-def place_limit_buy(limit_price: float, qty: float, sl_price: float) -> str | None:
+def place_limit_buy(limit_price: float, qty: float) -> str | None:
     """
-    Coloca orden limite BUY con SL adjunto.
+    Coloca orden limite BUY sin SL adjunto.
+    El SL se coloca por separado con place_sl_order() tras el fill.
     Retorna order_id o None si DRY_RUN.
     """
-    lp = round_price(limit_price)
-    sp = round_price(sl_price)
-    q  = str(round_qty(qty))
+    lp = _fmt_price(limit_price)
+    q  = _fmt_qty(qty)
 
-    if DRY_RUN:
+    if config.DRY_RUN:
         fake_id = f"DRY-{int(time.time())}"
-        print(f"  [DRY] LIMIT BUY  qty={q}  price={lp}  sl={sp}  -> id={fake_id}")
+        print(f"  [DRY] LIMIT BUY  qty={q}  price={lp}  -> id={fake_id}")
         return fake_id
 
-    resp = order_session().place_order(
-        category=CATEGORY,
-        symbol=SYMBOL,
-        side="Buy",
-        orderType="Limit",
-        qty=q,
-        price=str(lp),
-        timeInForce="GTC",
-        stopLoss=str(sp),
-        slTriggerBy="LastPrice",
-        positionIdx=0,   # one-way mode
+    resp = client().futures_create_order(
+        symbol      = SYMBOL,
+        side        = "BUY",
+        type        = "LIMIT",
+        quantity    = q,
+        price       = lp,
+        timeInForce = "GTC",
     )
-    _check(resp, "place_limit_buy")
-    order_id = resp["result"]["orderId"]
-    print(f"  [ORDER] LIMIT BUY colocada  qty={q}  price={lp}  sl={sp}  id={order_id}")
+    order_id = str(resp["orderId"])
+    print(f"  [ORDER] LIMIT BUY  qty={q}  price={lp}  id={order_id}")
     return order_id
 
 
+def place_sl_order(sl_price: float, qty: float) -> str | None:
+    """
+    Coloca STOP_MARKET SELL para el SL. Llamar tras confirmar el fill.
+    Retorna sl_order_id o None si DRY_RUN.
+    """
+    sp = _fmt_price(sl_price)
+
+    if config.DRY_RUN:
+        fake_id = f"DRY-SL-{int(time.time())}"
+        print(f"  [DRY] STOP_MARKET SL  stopPrice={sp}  -> id={fake_id}")
+        return fake_id
+
+    resp = client().futures_create_order(
+        symbol        = SYMBOL,
+        side          = "SELL",
+        type          = "STOP_MARKET",
+        stopPrice     = sp,
+        closePosition = "true",
+        timeInForce   = "GTE_GTC",
+    )
+    sl_order_id = str(resp["orderId"])
+    print(f"  [ORDER] STOP_MARKET SL  stopPrice={sp}  id={sl_order_id}")
+    return sl_order_id
+
+
 def cancel_order(order_id: str) -> bool:
-    if DRY_RUN:
+    if config.DRY_RUN:
         print(f"  [DRY] cancel_order {order_id}")
         return True
     try:
-        resp = order_session().cancel_order(
-            category=CATEGORY, symbol=SYMBOL, orderId=order_id
-        )
-        ok = resp.get("retCode") == 0
-        print(f"  [ORDER] Cancel {'OK' if ok else 'FAIL'}  id={order_id}")
-        return ok
-    except Exception as e:
-        print(f"  [WARN] cancel_order error: {e}")
+        client().futures_cancel_order(symbol=SYMBOL, orderId=int(order_id))
+        print(f"  [ORDER] Cancel OK  id={order_id}")
+        return True
+    except BinanceAPIException as e:
+        print(f"  [WARN] cancel_order: {e}")
         return False
 
 
 def get_order_status(order_id: str) -> str:
     """
-    Retorna el status de la orden:
-      "Filled" | "Cancelled" | "New" | "PartiallyFilled" | "Unknown"
+    Retorna status: "FILLED" | "CANCELED" | "NEW" | "PARTIALLY_FILLED" | "EXPIRED" | "UNKNOWN"
     """
-    if DRY_RUN:
-        return "New"   # simulado: siempre pendiente
+    if config.DRY_RUN:
+        return "NEW"
     try:
-        resp = order_session().get_order_history(
-            category=CATEGORY, symbol=SYMBOL, orderId=order_id, limit=1
-        )
-        _check(resp, "get_order_history")
-        lst = resp["result"]["list"]
-        if lst:
-            return lst[0]["orderStatus"]
-        return "Unknown"
-    except Exception as e:
+        resp = client().futures_get_order(symbol=SYMBOL, orderId=int(order_id))
+        return resp["status"]
+    except BinanceAPIException as e:
         print(f"  [WARN] get_order_status: {e}")
-        return "Unknown"
+        return "UNKNOWN"
 
 
 def get_filled_entry(order_id: str) -> float | None:
-    """Retorna el precio de ejecucion medio si la orden fue llenada."""
-    if DRY_RUN:
+    """Retorna precio promedio de ejecucion si la orden fue llenada."""
+    if config.DRY_RUN:
         return None
     try:
-        resp = order_session().get_order_history(
-            category=CATEGORY, symbol=SYMBOL, orderId=order_id, limit=1
-        )
-        lst = resp["result"]["list"]
-        if lst and lst[0]["orderStatus"] == "Filled":
-            return float(lst[0]["avgPrice"])
+        resp = client().futures_get_order(symbol=SYMBOL, orderId=int(order_id))
+        if resp["status"] == "FILLED":
+            return float(resp["avgPrice"])
         return None
-    except Exception:
+    except BinanceAPIException:
         return None
 
 
 def close_position_market(qty: float) -> bool:
-    """Cierra la posicion con orden market."""
-    q = str(round_qty(qty))
-    if DRY_RUN:
+    """Cierra la posicion con orden MARKET reduceOnly."""
+    q = _fmt_qty(qty)
+    if config.DRY_RUN:
         print(f"  [DRY] MARKET SELL (close)  qty={q}")
         return True
-
-    resp = order_session().place_order(
-        category=CATEGORY,
-        symbol=SYMBOL,
-        side="Sell",
-        orderType="Market",
-        qty=q,
-        timeInForce="IOC",
-        reduceOnly=True,
-        positionIdx=0,
-    )
-    ok = resp.get("retCode") == 0
-    print(f"  [ORDER] Market CLOSE {'OK' if ok else 'FAIL'}  qty={q}")
-    return ok
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _check(resp: dict, ctx: str) -> None:
-    if resp.get("retCode") != 0:
-        raise RuntimeError(f"Bybit API error en {ctx}: {resp.get('retMsg')} (code {resp.get('retCode')})")
+    try:
+        resp = client().futures_create_order(
+            symbol     = SYMBOL,
+            side       = "SELL",
+            type       = "MARKET",
+            quantity   = q,
+            reduceOnly = "true",
+        )
+        print(f"  [ORDER] Market CLOSE OK  qty={q}  id={resp['orderId']}")
+        return True
+    except BinanceAPIException as e:
+        print(f"  [WARN] close_position_market: {e}")
+        return False
