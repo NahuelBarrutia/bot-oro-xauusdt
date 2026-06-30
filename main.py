@@ -84,6 +84,14 @@ def iterate(state: dict) -> dict:
         print(f"  [OPEN] bars_held={state['bars_held']}/{config.HOLD_BARS}  "
               f"entry={state['entry_price']:.2f}  sl={state['sl_price']:.2f}")
 
+        # Auto-recuperacion: si el SL no quedo confirmado (crash previo en
+        # place_sl_order), reintentar/adoptar el SL existente antes de seguir.
+        if not state["sl_order_id"] and not config.DRY_RUN:
+            print(f"  [WARN] sl_order_id vacio en estado open — reintentando")
+            sl_order_id = ex.place_sl_order(state["sl_price"], state["entry_qty"])
+            state["sl_order_id"] = sl_order_id or ""
+            st.save(state)
+
         pos = ex.get_open_position()
 
         if pos is None:
@@ -149,9 +157,11 @@ def iterate(state: dict) -> dict:
             state["bars_held"]      = 0
             state["entry_bar_time"] = candles[-1]["time"]
             state["phase"]          = "open"
+            state["sl_order_id"]    = ""
+            st.save(state)   # guardar "open" YA, antes de intentar el SL
             print(f"  [FILL] Orden llenada a {filled_entry:.2f}  sl={state['sl_price']:.2f}")
 
-            # Colocar SL inmediatamente
+            # Colocar SL inmediatamente (con retry + deteccion de duplicados)
             sl_order_id = ex.place_sl_order(state["sl_price"], state["entry_qty"])
             state["sl_order_id"] = sl_order_id or ""
             st.save(state)

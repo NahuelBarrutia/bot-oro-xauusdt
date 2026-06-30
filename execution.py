@@ -209,29 +209,68 @@ def place_limit_buy(limit_price: float, qty: float) -> str | None:
     return order_id
 
 
-def place_sl_order(sl_price: float, qty: float) -> str | None:
+def get_open_sl_order() -> dict | None:
+    """Busca una orden STOP_MARKET SELL ya abierta para SYMBOL (idempotencia)."""
+    try:
+        orders = client().futures_get_open_orders(symbol=SYMBOL)
+    except BinanceAPIException as e:
+        print(f"  [WARN] get_open_sl_order: {e}")
+        return None
+    for o in orders:
+        if o.get("type") == "STOP_MARKET" and o.get("side") == "SELL":
+            return o
+    return None
+
+
+def place_sl_order(sl_price: float, qty: float, retries: int = 2) -> str | None:
     """
     Coloca STOP_MARKET SELL para el SL. Llamar tras confirmar el fill.
-    Retorna sl_order_id o None si DRY_RUN.
+    Antes de colocar, verifica si ya existe un SL abierto (evita duplicados
+    si una llamada previa fallo en el parseo de la respuesta pero la orden
+    si se creo del lado de Binance).
+    Retorna sl_order_id, o None si DRY_RUN o si fallaron todos los intentos.
     """
-    sp = _fmt_price(sl_price)
-
     if config.DRY_RUN:
         fake_id = f"DRY-SL-{int(time.time())}"
-        print(f"  [DRY] STOP_MARKET SL  stopPrice={sp}  -> id={fake_id}")
+        print(f"  [DRY] STOP_MARKET SL  stopPrice={_fmt_price(sl_price)}  -> id={fake_id}")
         return fake_id
 
-    resp = client().futures_create_order(
-        symbol        = SYMBOL,
-        side          = "SELL",
-        type          = "STOP_MARKET",
-        stopPrice     = sp,
-        closePosition = "true",
-        timeInForce   = "GTE_GTC",
-    )
-    sl_order_id = str(resp["orderId"])
-    print(f"  [ORDER] STOP_MARKET SL  stopPrice={sp}  id={sl_order_id}")
-    return sl_order_id
+    existing = get_open_sl_order()
+    if existing is not None:
+        sl_order_id = str(existing["orderId"])
+        print(f"  [SL] Ya existe un STOP_MARKET abierto  id={sl_order_id}  "
+              f"(se reutiliza, no se duplica)")
+        return sl_order_id
+
+    sp = _fmt_price(sl_price)
+    last_err: Exception | None = None
+
+    for attempt in range(1, retries + 1):
+        try:
+            resp = client().futures_create_order(
+                symbol        = SYMBOL,
+                side          = "SELL",
+                type          = "STOP_MARKET",
+                stopPrice     = sp,
+                closePosition = "true",
+                timeInForce   = "GTE_GTC",
+            )
+            sl_order_id = str(resp["orderId"])
+            print(f"  [ORDER] STOP_MARKET SL  stopPrice={sp}  id={sl_order_id}")
+            return sl_order_id
+        except (BinanceAPIException, KeyError) as e:
+            last_err = e
+            print(f"  [WARN] place_sl_order intento {attempt}/{retries} fallo: {e}")
+            # La orden puede haberse creado en Binance pese al error de respuesta.
+            existing = get_open_sl_order()
+            if existing is not None:
+                sl_order_id = str(existing["orderId"])
+                print(f"  [SL] Recuperado tras fallo de respuesta  id={sl_order_id}")
+                return sl_order_id
+            time.sleep(2)
+
+    print(f"  [ERROR] No se pudo colocar ni confirmar el SL tras {retries} intentos: {last_err}")
+    return None
 
 
 def cancel_order(order_id: str) -> bool:
