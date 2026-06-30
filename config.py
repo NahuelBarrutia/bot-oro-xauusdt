@@ -73,7 +73,10 @@ HOLD_BARS    = 9
 COMMISSION_PCT = 0.0002     # 0.02% por lado
 
 # ── Rutas ──────────────────────────────────────────────────────────────────────
+# DATA_DIR apunta al volume persistente de Railway (NO al codigo). Si no esta
+# seteado (ej. corriendo local), usa la carpeta del bot como antes.
 
 BOT_DIR    = pathlib.Path(__file__).parent
-STATE_FILE = BOT_DIR / "state.json"
-LOG_FILE   = BOT_DIR / "trades.csv"
+DATA_DIR   = pathlib.Path(os.getenv("DATA_DIR", str(BOT_DIR)))
+STATE_FILE = DATA_DIR / "state.json"
+LOG_FILE   = DATA_DIR / "trades.csv"
