@@ -174,6 +174,25 @@ def iterate(state: dict) -> dict:
 
         return state
 
+    # ── IDLE: chequeo defensivo — el estado local pudo perderse en un redeploy
+    # (filesystem efimero en Railway) mientras la posicion sigue viva en Binance.
+    if not config.DRY_RUN:
+        pos = ex.get_open_position()
+        if pos is not None:
+            qty = abs(float(pos["positionAmt"]))
+            sl_order = ex.get_open_sl_order()
+            sl_price = float(sl_order["stopPrice"]) if sl_order else last_low
+            print(f"  [WARN] Posicion abierta en Binance sin estado local — adoptando "
+                  f"(entry={pos['entryPrice']}  qty={qty}  sl={sl_price})")
+            state["phase"]          = "open"
+            state["entry_price"]    = float(pos["entryPrice"])
+            state["entry_qty"]      = qty
+            state["sl_price"]       = sl_price
+            state["sl_order_id"]    = str(sl_order["orderId"]) if sl_order else ""
+            state["bars_held"]      = 0
+            st.save(state)
+            return state
+
     # ── IDLE: evaluar señal ───────────────────────────────────────────────────
     sig = strategy.evaluate(df)
     print(f"  [SIGNAL] {sig['reason']}")
