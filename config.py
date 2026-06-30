@@ -42,8 +42,11 @@ def _load_keys() -> tuple:
 
 SYMBOL   = "XAUUSDT"
 INTERVAL = "1h"       # formato Binance
-LEVERAGE = 2
+LEVERAGE = 10         # suficiente margen para qty calculado por riesgo (ver MARGIN_BUFFER)
 TESTNET  = os.getenv("BINANCE_TESTNET", "true").lower() == "true"
+
+# Tope de seguridad: nunca usar mas que este % del capital como margen de una posicion
+MARGIN_BUFFER = 0.90
 
 # Modo sin ordenes reales (Railway: DRY_RUN=false)
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"

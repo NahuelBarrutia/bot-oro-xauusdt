@@ -142,11 +142,28 @@ def get_open_position() -> dict | None:
 
 # ── Calcular qty ──────────────────────────────────────────────────────────────
 
-def calc_qty(entry: float, sl: float, risk_usd: float) -> float:
+def calc_qty(entry: float, sl: float, risk_usd: float, capital: float, leverage: float) -> float:
+    """
+    Qty por riesgo fijo, recortado al margen disponible.
+    Si el riesgo objetivo (risk_usd) requeriria mas margen del que hay,
+    se reduce el qty (y por lo tanto el riesgo real de esa trade) en vez
+    de fallar la orden por -2019 Margin is insufficient.
+    """
     sl_dist = abs(entry - sl)
     if sl_dist <= 0:
         return 0.0
-    return round_qty(risk_usd / sl_dist)
+
+    qty_risk = risk_usd / sl_dist
+
+    max_notional = capital * leverage * config.MARGIN_BUFFER
+    qty_margin   = max_notional / entry
+
+    qty = min(qty_risk, qty_margin)
+    if qty < qty_risk:
+        print(f"  [WARN] qty recortado por margen: {qty_risk:.4f} -> {qty:.4f} "
+              f"(riesgo real ${qty*sl_dist:.2f} en vez de ${risk_usd:.2f})")
+
+    return round_qty(qty)
 
 
 # ── Ordenes ───────────────────────────────────────────────────────────────────

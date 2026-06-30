@@ -179,7 +179,7 @@ def iterate(state: dict) -> dict:
         return state
 
     risk_usd = state["capital"] * config.RISK_PCT
-    qty      = ex.calc_qty(limit_price, sl_price, risk_usd)
+    qty      = ex.calc_qty(limit_price, sl_price, risk_usd, state["capital"], config.LEVERAGE)
 
     if qty <= 0:
         print(f"  [SKIP] qty calculada = 0")
@@ -206,10 +206,15 @@ def iterate(state: dict) -> dict:
 
 
 def _compute_pnl(state: dict, exit_price: float) -> float:
-    entry   = state["entry_price"]
-    qty     = state["entry_qty"]
-    gross   = (exit_price - entry) * qty * config.LEVERAGE
-    comm    = (entry + exit_price) * qty * config.COMMISSION_PCT * config.LEVERAGE
+    """
+    PnL real tal como lo liquida Binance: precio x qty, sin multiplicar
+    de nuevo por leverage (el leverage ya esta reflejado en el margen
+    usado para abrir la posicion, no en el PnL por unidad).
+    """
+    entry = state["entry_price"]
+    qty   = state["entry_qty"]
+    gross = (exit_price - entry) * qty
+    comm  = (entry + exit_price) * qty * config.COMMISSION_PCT
     return round(gross - comm, 2)
 
 
