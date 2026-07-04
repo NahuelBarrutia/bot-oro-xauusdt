@@ -175,7 +175,7 @@ def iterate(state: dict) -> dict:
         return state
 
     # ── IDLE: chequeo defensivo — el estado local pudo perderse en un redeploy
-    # (filesystem efimero en Railway) mientras la posicion sigue viva en Binance.
+    # o un timeout -1007 en place_limit_buy dejo una orden abierta sin state.
     if not config.DRY_RUN:
         pos = ex.get_open_position()
         if pos is not None:
@@ -190,6 +190,23 @@ def iterate(state: dict) -> dict:
             state["sl_price"]       = sl_price
             state["sl_order_id"]    = str(sl_order["orderId"]) if sl_order else ""
             state["bars_held"]      = 0
+            st.save(state)
+            return state
+
+        limit_order = ex.get_open_limit_buy()
+        if limit_order is not None:
+            order_price = float(limit_order["price"])
+            order_qty   = float(limit_order["origQty"])
+            order_id    = str(limit_order["orderId"])
+            print(f"  [WARN] Orden LIMIT BUY abierta sin estado local — adoptando "
+                  f"(price={order_price:.2f}  qty={order_qty}  id={order_id})")
+            state["phase"]            = "pending"
+            state["pending_price"]    = order_price
+            state["pending_order_id"] = order_id
+            state["pending_bars"]     = 0
+            state["sl_price"]         = last_low
+            state["entry_qty"]        = order_qty
+            state["sl_order_id"]      = ""
             st.save(state)
             return state
 

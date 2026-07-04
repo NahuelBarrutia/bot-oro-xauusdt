@@ -182,11 +182,31 @@ def set_leverage() -> None:
             print(f"  [WARN] set_leverage: {e}")
 
 
+def get_open_limit_buy(price: float | None = None) -> dict | None:
+    """
+    Busca una orden LIMIT BUY abierta para SYMBOL.
+    Si se pasa price, filtra por precio exacto (tolerancia 0.01).
+    Usada para idempotencia tras timeout -1007 y para adopcion defensiva en idle.
+    """
+    try:
+        orders = client().futures_get_open_orders(symbol=SYMBOL)
+    except BinanceAPIException as e:
+        print(f"  [WARN] get_open_limit_buy: {e}")
+        return None
+    for o in orders:
+        if o.get("type") == "LIMIT" and o.get("side") == "BUY":
+            if price is None or abs(float(o["price"]) - price) < 0.01:
+                return o
+    return None
+
+
 def place_limit_buy(limit_price: float, qty: float) -> str | None:
     """
     Coloca orden limite BUY sin SL adjunto.
     El SL se coloca por separado con place_sl_order() tras el fill.
-    Retorna order_id o None si DRY_RUN.
+    En caso de timeout -1007 (estado desconocido), verifica si la orden
+    quedo abierta en Binance antes de reportar fallo.
+    Retorna order_id o None si DRY_RUN o si fallo sin recuperacion.
     """
     lp = _fmt_price(limit_price)
     q  = _fmt_qty(qty)
@@ -196,17 +216,35 @@ def place_limit_buy(limit_price: float, qty: float) -> str | None:
         print(f"  [DRY] LIMIT BUY  qty={q}  price={lp}  -> id={fake_id}")
         return fake_id
 
-    resp = client().futures_create_order(
-        symbol      = SYMBOL,
-        side        = "BUY",
-        type        = "LIMIT",
-        quantity    = q,
-        price       = lp,
-        timeInForce = "GTC",
-    )
-    order_id = str(resp["orderId"])
-    print(f"  [ORDER] LIMIT BUY  qty={q}  price={lp}  id={order_id}")
-    return order_id
+    # Idempotencia previa: si ya existe una orden al mismo precio, reutilizarla
+    existing = get_open_limit_buy(limit_price)
+    if existing is not None:
+        order_id = str(existing["orderId"])
+        print(f"  [ORDER] LIMIT BUY ya existe  price={lp}  id={order_id}  (reutilizado)")
+        return order_id
+
+    try:
+        resp = client().futures_create_order(
+            symbol      = SYMBOL,
+            side        = "BUY",
+            type        = "LIMIT",
+            quantity    = q,
+            price       = lp,
+            timeInForce = "GTC",
+        )
+        order_id = str(resp["orderId"])
+        print(f"  [ORDER] LIMIT BUY  qty={q}  price={lp}  id={order_id}")
+        return order_id
+    except (BinanceAPIException, KeyError) as e:
+        # -1007: timeout — la orden puede haberse creado del lado de Binance
+        print(f"  [WARN] place_limit_buy fallo: {e}")
+        existing = get_open_limit_buy(limit_price)
+        if existing is not None:
+            order_id = str(existing["orderId"])
+            print(f"  [ORDER] LIMIT BUY recuperado tras timeout  id={order_id}")
+            return order_id
+        print(f"  [WARN] Sin orden abierta confirmada — no se coloco la orden")
+        return None
 
 
 def get_open_sl_order() -> dict | None:
