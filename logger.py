@@ -66,6 +66,47 @@ def log_trade(
           f"R={r:+.3f}  pnl=${pnl_usd:+.2f}  capital=${capital:,.2f}")
 
 
+def get_running_stats() -> dict:
+    """Retorna stats acumuladas del CSV para mostrar en cada iteracion."""
+    if not os.path.exists(LOG_FILE):
+        return {"n": 0, "wins": 0, "wr": 0.0, "r_avg": 0.0, "streak": 0, "streak_type": ""}
+
+    trades = []
+    with open(LOG_FILE, newline="") as f:
+        for row in csv.DictReader(f):
+            trades.append(row)
+
+    if not trades:
+        return {"n": 0, "wins": 0, "wr": 0.0, "r_avg": 0.0, "streak": 0, "streak_type": ""}
+
+    n     = len(trades)
+    wins  = sum(1 for t in trades if float(t["pnl_usd"]) > 0)
+    r_avg = sum(float(t["resultado_R"]) for t in trades) / n
+
+    # Racha actual (ultimos trades consecutivos del mismo tipo)
+    streak = 0
+    streak_type = ""
+    last = None
+    for t in reversed(trades):
+        won = float(t["pnl_usd"]) > 0
+        if last is None:
+            last = won
+            streak_type = "W" if won else "L"
+        if won == last:
+            streak += 1
+        else:
+            break
+
+    return {
+        "n":           n,
+        "wins":        wins,
+        "wr":          wins / n * 100,
+        "r_avg":       r_avg,
+        "streak":      streak,
+        "streak_type": streak_type,
+    }
+
+
 def print_summary() -> None:
     """Imprime resumen de trades del CSV."""
     if not os.path.exists(LOG_FILE):

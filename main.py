@@ -43,10 +43,16 @@ def seconds_to_next_h1() -> float:
 
 def iterate(state: dict) -> dict:
     now_str = utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
+    stats   = logger.get_running_stats()
+
     print(f"\n{'='*60}")
     print(f"  Iteracion  {now_str}")
     print(f"  Estado:    {state['phase']}  |  Capital: ${state['capital']:,.2f}")
     print(f"  PnL hoy:   ${state['daily_pnl']:+.2f}  (fecha={state['daily_date']})")
+    if stats["n"] > 0:
+        racha = f"{stats['streak']}{stats['streak_type']}"
+        print(f"  Trades:    {stats['n']} total  |  WR: {stats['wr']:.1f}%  "
+              f"|  R avg: {stats['r_avg']:+.3f}  |  Racha: {racha}")
 
     # ── Reset diario ──────────────────────────────────────────────────────────
     today = today_str()
