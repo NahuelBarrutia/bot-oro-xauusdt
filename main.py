@@ -92,6 +92,31 @@ def iterate(state: dict) -> dict:
             state["sl_order_id"] = sl_order_id or ""
             st.save(state)
 
+            # Si sigue sin SL despues de los reintentos, cerrar la posicion
+            # de inmediato — nunca correr una posicion naked sin stop.
+            if not state["sl_order_id"]:
+                print(f"  [EMERGENCY] SL no confirmado tras reintentos — cerrando posicion")
+                ex.close_position_market(state["entry_qty"])
+                time.sleep(2)
+                pos_check = ex.get_open_position()
+                exit_price = float(pos_check["markPrice"]) if pos_check else state["sl_price"]
+                pnl = _compute_pnl(state, exit_price)
+                state["daily_pnl"] += pnl
+                state["capital"]   += pnl
+                logger.log_trade(
+                    entry       = state["entry_price"],
+                    sl          = state["sl_price"],
+                    exit_price  = exit_price,
+                    exit_reason = "EMERGENCY",
+                    bars_held   = state["bars_held"],
+                    pnl_usd     = pnl,
+                    capital     = state["capital"],
+                    order_id    = state["pending_order_id"],
+                )
+                state = st.reset_to_idle(state)
+                st.save(state)
+                return state
+
         pos = ex.get_open_position()
 
         if pos is None:
@@ -222,6 +247,11 @@ def iterate(state: dict) -> dict:
 
     if sl_price >= limit_price:
         print(f"  [SKIP] SL degenerado: sl={sl_price:.2f} >= limit={limit_price:.2f}")
+        return state
+
+    if (limit_price - sl_price) < config.MIN_SL_DIST:
+        print(f"  [SKIP] SL demasiado cerca: dist={limit_price - sl_price:.2f} < "
+              f"min={config.MIN_SL_DIST:.1f}  (sl={sl_price:.2f}  limit={limit_price:.2f})")
         return state
 
     risk_usd = state["capital"] * config.RISK_PCT

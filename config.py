@@ -67,6 +67,10 @@ SAR_CONFIRM  = 3
 DAILY_BARS   = 24
 PENDING_BARS = 5
 HOLD_BARS    = 9
+# SL minimo en precio: rechaza entradas donde low_previo esta demasiado cerca
+# del entry. Para XAUUSD H1, una vela tipica mueve $5-20; por debajo de $5
+# el SL es practicamente un fill garantizado y el sizing queda degenerado.
+MIN_SL_DIST  = 5.0
 
 # ── Comision Binance Futures maker (limit order) ───────────────────────────────
 
