@@ -196,6 +196,31 @@ def iterate(state: dict) -> dict:
             state["sl_order_id"] = sl_order_id or ""
             st.save(state)
 
+            # Si el SL no se pudo colocar tras el fill, cerrar ahora mismo
+            if not state["sl_order_id"] and not config.DRY_RUN:
+                print(f"  [EMERGENCY] SL fallo inmediatamente tras fill — cerrando")
+                ex.cancel_all_open_orders()
+                ex.close_position_market(state["entry_qty"])
+                time.sleep(2)
+                pos_check = ex.get_open_position()
+                exit_price = float(pos_check["markPrice"]) if pos_check else state["sl_price"]
+                pnl = _compute_pnl(state, exit_price)
+                state["daily_pnl"] += pnl
+                state["capital"]   += pnl
+                logger.log_trade(
+                    entry       = state["entry_price"],
+                    sl          = state["sl_price"],
+                    exit_price  = exit_price,
+                    exit_reason = "EMERGENCY",
+                    bars_held   = state["bars_held"],
+                    pnl_usd     = pnl,
+                    capital     = state["capital"],
+                    order_id    = state["pending_order_id"],
+                )
+                state = st.reset_to_idle(state)
+                st.save(state)
+                return state
+
         elif state["pending_bars"] >= config.PENDING_BARS or status in ("CANCELED", "REJECTED", "EXPIRED"):
             ex.cancel_order(order_id)
             print(f"  [EXPIRE] Orden expirada tras {state['pending_bars']} barras.")

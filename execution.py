@@ -302,6 +302,11 @@ def place_sl_order(sl_price: float, qty: float, retries: int = 2) -> str | None:
         except (BinanceAPIException, KeyError) as e:
             last_err = e
             print(f"  [WARN] place_sl_order intento {attempt}/{retries} fallo: {e}")
+            # -2021: stopPrice ya fue cruzado por el mercado — no reintentar,
+            # el caller debe cerrar la posicion por mercado inmediatamente.
+            if isinstance(e, BinanceAPIException) and e.code == -2021:
+                print(f"  [WARN] SL -2021: precio ya paso el stop — cerrar por mercado")
+                break
             # -4130: ya existe un SL en Binance — buscarlo y reutilizarlo.
             # No reintentar: crear otro daría el mismo error.
             if isinstance(e, BinanceAPIException) and e.code == -4130:
