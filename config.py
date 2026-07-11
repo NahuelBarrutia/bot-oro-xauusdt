@@ -71,6 +71,9 @@ HOLD_BARS    = 9
 # del entry. Para XAUUSD H1, una vela tipica mueve $5-20; por debajo de $5
 # el SL es practicamente un fill garantizado y el sizing queda degenerado.
 MIN_SL_DIST  = 5.0
+# Intervalo del fast poll (segundos). Cada 5 min chequea fills/posicion;
+# la logica de señal y bars_held solo se ejecuta cuando hay nueva vela H1.
+POLL_INTERVAL = 300
 
 # ── Comision Binance Futures maker (limit order) ───────────────────────────────
 

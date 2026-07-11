@@ -33,20 +33,22 @@ def today_str() -> str:
     return utc_now().strftime("%Y-%m-%d")
 
 
-def seconds_to_next_h1() -> float:
-    now     = time.time()
-    elapsed = now % 3600
-    return 3600 - elapsed + 5.0
-
-
 # ── Ciclo principal ────────────────────────────────────────────────────────────
 
-def iterate(state: dict) -> dict:
+def iterate(state: dict, new_h1: bool = True) -> dict:
+    """
+    new_h1=True  → vela H1 nueva cerrada: incrementa barras, evalua señal
+    new_h1=False → chequeo rapido (cada POLL_INTERVAL seg): solo fills y posicion
+    """
     now_str = utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
     stats   = logger.get_running_stats()
 
-    print(f"\n{'='*60}")
-    print(f"  Iteracion  {now_str}")
+    if new_h1:
+        print(f"\n{'='*60}")
+        print(f"  Iteracion H1  {now_str}")
+    else:
+        print(f"\n  -- Chequeo  {now_str}")
+
     print(f"  Estado:    {state['phase']}  |  Capital: ${state['capital']:,.2f}")
     print(f"  PnL hoy:   ${state['daily_pnl']:+.2f}  (fecha={state['daily_date']})")
     if stats["n"] > 0:
@@ -54,13 +56,14 @@ def iterate(state: dict) -> dict:
         print(f"  Trades:    {stats['n']} total  |  WR: {stats['wr']:.1f}%  "
               f"|  R avg: {stats['r_avg']:+.3f}  |  Racha: {racha}")
 
-    # ── Reset diario ──────────────────────────────────────────────────────────
-    today = today_str()
-    if state["daily_date"] != today:
-        state["daily_pnl"]  = 0.0
-        state["daily_date"] = today
-        print(f"  [DIARIO] Nuevo dia {today} — PnL reseteado.")
-        st.save(state)
+    # ── Reset diario (solo en H1 para no spamear) ────────────────────────────
+    if new_h1:
+        today = today_str()
+        if state["daily_date"] != today:
+            state["daily_pnl"]  = 0.0
+            state["daily_date"] = today
+            print(f"  [DIARIO] Nuevo dia {today} — PnL reseteado.")
+            st.save(state)
 
     # ── Daily stop ────────────────────────────────────────────────────────────
     if state["daily_pnl"] <= -config.DAILY_STOP_USD:
@@ -86,7 +89,8 @@ def iterate(state: dict) -> dict:
 
     # ── OPEN: verificar SL tocado o time exit ─────────────────────────────────
     if state["phase"] == "open":
-        state["bars_held"] += 1
+        if new_h1:
+            state["bars_held"] += 1
         print(f"  [OPEN] bars_held={state['bars_held']}/{config.HOLD_BARS}  "
               f"entry={state['entry_price']:.2f}  sl={state['sl_price']:.2f}")
 
@@ -146,7 +150,7 @@ def iterate(state: dict) -> dict:
             st.save(state)
             return state
 
-        if state["bars_held"] >= config.HOLD_BARS:
+        if new_h1 and state["bars_held"] >= config.HOLD_BARS:
             # Time exit: cancelar todas las ordenes abiertas, luego cerrar con market
             ex.cancel_all_open_orders()
             ex.close_position_market(state["entry_qty"])
@@ -173,7 +177,8 @@ def iterate(state: dict) -> dict:
 
     # ── PENDING: verificar fill o expiracion ──────────────────────────────────
     if state["phase"] == "pending":
-        state["pending_bars"] += 1
+        if new_h1:
+            state["pending_bars"] += 1
         order_id = state["pending_order_id"]
         print(f"  [PENDING] bars={state['pending_bars']}/{config.PENDING_BARS}  "
               f"precio={state['pending_price']:.2f}  order_id={order_id}")
@@ -221,7 +226,7 @@ def iterate(state: dict) -> dict:
                 st.save(state)
                 return state
 
-        elif state["pending_bars"] >= config.PENDING_BARS or status in ("CANCELED", "REJECTED", "EXPIRED"):
+        elif new_h1 and (state["pending_bars"] >= config.PENDING_BARS or status in ("CANCELED", "REJECTED", "EXPIRED")):
             ex.cancel_order(order_id)
             print(f"  [EXPIRE] Orden expirada tras {state['pending_bars']} barras.")
             state = st.reset_to_idle(state)
@@ -265,7 +270,10 @@ def iterate(state: dict) -> dict:
             st.save(state)
             return state
 
-    # ── IDLE: evaluar señal ───────────────────────────────────────────────────
+    # ── IDLE: evaluar señal (solo en cierre de H1) ───────────────────────────
+    if not new_h1:
+        return state
+
     sig = strategy.evaluate(df)
     print(f"  [SIGNAL] {sig['reason']}")
 
@@ -363,10 +371,24 @@ def main() -> None:
         logger.print_summary()
         return
 
-    print("\nEntrando al loop H1. Ctrl+C para detener.\n")
+    print(f"\nEntrando al loop (poll cada {config.POLL_INTERVAL}s). Ctrl+C para detener.\n")
+    last_h1_time: int = 0
+
     while True:
         try:
-            state = iterate(state)
+            # Detectar si cerro una nueva vela H1
+            try:
+                candles_peek = ex.get_h1_candles(limit=2)
+                current_h1_time = candles_peek[-1]["time"] if candles_peek else 0
+            except Exception:
+                current_h1_time = last_h1_time
+
+            new_h1 = current_h1_time != last_h1_time
+            if new_h1:
+                last_h1_time = current_h1_time
+
+            state = iterate(state, new_h1=new_h1)
+
         except KeyboardInterrupt:
             print("\nBot detenido.")
             logger.print_summary()
@@ -376,9 +398,8 @@ def main() -> None:
             import traceback
             traceback.print_exc()
 
-        wait = seconds_to_next_h1()
-        print(f"\n  Proxima iteracion en {wait/60:.1f} min ({wait:.0f}s)...")
-        time.sleep(wait)
+        print(f"\n  Proximo chequeo en {config.POLL_INTERVAL}s...")
+        time.sleep(config.POLL_INTERVAL)
 
 
 if __name__ == "__main__":
