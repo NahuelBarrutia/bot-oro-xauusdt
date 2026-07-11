@@ -294,7 +294,7 @@ def place_sl_order(sl_price: float, qty: float, retries: int = 2) -> str | None:
                 type          = "STOP_MARKET",
                 stopPrice     = sp,
                 closePosition = "true",
-                timeInForce   = "GTE_GTC",
+                # timeInForce omitido: en testnet GTE_GTC puede causar -4130
             )
             sl_order_id = str(resp["orderId"])
             print(f"  [ORDER] STOP_MARKET SL  stopPrice={sp}  id={sl_order_id}")
@@ -346,6 +346,18 @@ def cancel_order(order_id: str) -> bool:
     except BinanceAPIException as e:
         print(f"  [WARN] cancel_order: {e}")
         return False
+
+
+def cancel_all_open_orders() -> None:
+    """Cancela todas las ordenes abiertas para SYMBOL. Usar antes de emergency close."""
+    if config.DRY_RUN:
+        print(f"  [DRY] cancel_all_open_orders")
+        return
+    try:
+        result = client().futures_cancel_all_open_orders(symbol=SYMBOL)
+        print(f"  [ORDER] Cancel all open orders: {result}")
+    except BinanceAPIException as e:
+        print(f"  [WARN] cancel_all_open_orders: {e}")
 
 
 def get_order_status(order_id: str) -> str:

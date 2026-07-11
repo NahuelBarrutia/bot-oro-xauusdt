@@ -102,6 +102,7 @@ def iterate(state: dict) -> dict:
             # de inmediato — nunca correr una posicion naked sin stop.
             if not state["sl_order_id"]:
                 print(f"  [EMERGENCY] SL no confirmado tras reintentos — cerrando posicion")
+                ex.cancel_all_open_orders()   # limpiar SL huerfanos antes de cerrar
                 ex.close_position_market(state["entry_qty"])
                 time.sleep(2)
                 pos_check = ex.get_open_position()
@@ -146,10 +147,8 @@ def iterate(state: dict) -> dict:
             return state
 
         if state["bars_held"] >= config.HOLD_BARS:
-            # Time exit: cancelar SL primero, luego cerrar con market
-            if state["sl_order_id"]:
-                ex.cancel_order(state["sl_order_id"])
-
+            # Time exit: cancelar todas las ordenes abiertas, luego cerrar con market
+            ex.cancel_all_open_orders()
             ex.close_position_market(state["entry_qty"])
             time.sleep(2)
 
