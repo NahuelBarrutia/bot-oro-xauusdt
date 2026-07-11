@@ -248,14 +248,17 @@ def place_limit_buy(limit_price: float, qty: float) -> str | None:
 
 
 def get_open_sl_order() -> dict | None:
-    """Busca una orden STOP_MARKET SELL ya abierta para SYMBOL (idempotencia)."""
+    """
+    Busca una orden SELL de cierre abierta para SYMBOL (idempotencia).
+    Acepta STOP_MARKET o STOP — Binance Testnet a veces devuelve tipos distintos.
+    """
     try:
         orders = client().futures_get_open_orders(symbol=SYMBOL)
     except BinanceAPIException as e:
         print(f"  [WARN] get_open_sl_order: {e}")
         return None
     for o in orders:
-        if o.get("type") == "STOP_MARKET" and o.get("side") == "SELL":
+        if o.get("side") == "SELL" and o.get("type") in ("STOP_MARKET", "STOP"):
             return o
     return None
 
@@ -299,7 +302,28 @@ def place_sl_order(sl_price: float, qty: float, retries: int = 2) -> str | None:
         except (BinanceAPIException, KeyError) as e:
             last_err = e
             print(f"  [WARN] place_sl_order intento {attempt}/{retries} fallo: {e}")
-            # La orden puede haberse creado en Binance pese al error de respuesta.
+            # -4130: ya existe un SL en Binance — buscarlo y reutilizarlo.
+            # No reintentar: crear otro daría el mismo error.
+            if isinstance(e, BinanceAPIException) and e.code == -4130:
+                existing = get_open_sl_order()
+                if existing is not None:
+                    sl_order_id = str(existing["orderId"])
+                    print(f"  [SL] SL existente recuperado via -4130  id={sl_order_id}")
+                    return sl_order_id
+                # Si aun no lo encontramos, buscar cualquier orden SELL abierta
+                try:
+                    all_orders = client().futures_get_open_orders(symbol=SYMBOL)
+                    sell_order = next((o for o in all_orders if o.get("side") == "SELL"), None)
+                    if sell_order is not None:
+                        sl_order_id = str(sell_order["orderId"])
+                        print(f"  [SL] SL encontrado (busqueda amplia)  id={sl_order_id}  "
+                              f"type={sell_order.get('type')}")
+                        return sl_order_id
+                except BinanceAPIException:
+                    pass
+                print(f"  [WARN] -4130 pero no se encontro el SL existente")
+                break  # no reintentar, el SL existe aunque no lo podamos leer
+            # Otros errores: la orden puede haberse creado pese al error.
             existing = get_open_sl_order()
             if existing is not None:
                 sl_order_id = str(existing["orderId"])
