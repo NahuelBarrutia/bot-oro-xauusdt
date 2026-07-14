@@ -296,11 +296,12 @@ def place_sl_order(sl_price: float, qty: float, retries: int = 2) -> str | None:
                 stopPrice  = sp,
                 quantity   = q,
                 reduceOnly = "true",
-                # closePosition="true" omitido: en testnet causa respuesta sin
-                # 'orderId' y la orden no aparece en futures_get_open_orders,
-                # rompiendo la deteccion de duplicados y generando el loop -4130.
             )
-            sl_order_id = str(resp["orderId"])
+            print(f"  [DEBUG] SL resp keys: {list(resp.keys()) if isinstance(resp, dict) else type(resp)}")
+            sl_order_id = str(resp.get("orderId") or resp.get("clientOrderId") or "")
+            if not sl_order_id:
+                raise KeyError(f"orderId ausente en resp: {resp}")
+
             print(f"  [ORDER] STOP_MARKET SL  stopPrice={sp}  id={sl_order_id}")
             return sl_order_id
         except (BinanceAPIException, KeyError) as e:
