@@ -294,7 +294,7 @@ def iterate(state: dict, new_h1: bool = True) -> dict:
 
         limit_order = ex.get_open_limit_buy()
         if limit_order is not None:
-            order_price = float(limit_order["price"])
+            order_price = float(limit_order.get("stopPrice") or limit_order.get("price") or 0)
             order_qty   = float(limit_order["origQty"])
             order_id    = str(limit_order["orderId"])
             print(f"  [WARN] Orden LIMIT BUY abierta sin estado local — adoptando "

@@ -184,9 +184,8 @@ def set_leverage() -> None:
 
 def get_open_limit_buy(price: float | None = None) -> dict | None:
     """
-    Busca una orden LIMIT BUY abierta para SYMBOL.
-    Si se pasa price, filtra por precio exacto (tolerancia 0.01).
-    Usada para idempotencia tras timeout -1007 y para adopcion defensiva en idle.
+    Busca una orden BUY pendiente (STOP_MARKET o LIMIT) para SYMBOL.
+    Si se pasa price, filtra por stopPrice/price exacto (tolerancia 0.01).
     """
     try:
         orders = client().futures_get_open_orders(symbol=SYMBOL)
@@ -194,18 +193,19 @@ def get_open_limit_buy(price: float | None = None) -> dict | None:
         print(f"  [WARN] get_open_limit_buy: {e}")
         return None
     for o in orders:
-        if o.get("type") == "LIMIT" and o.get("side") == "BUY":
-            if price is None or abs(float(o["price"]) - price) < 0.01:
+        if o.get("side") == "BUY" and o.get("type") in ("STOP_MARKET", "LIMIT"):
+            entry_price = float(o.get("stopPrice") or o.get("price") or 0)
+            if price is None or abs(entry_price - price) < 0.01:
                 return o
     return None
 
 
 def place_limit_buy(limit_price: float, qty: float) -> str | None:
     """
-    Coloca orden limite BUY sin SL adjunto.
-    El SL se coloca por separado con place_sl_order() tras el fill.
-    En caso de timeout -1007 (estado desconocido), verifica si la orden
-    quedo abierta en Binance antes de reportar fallo.
+    Coloca BUY STOP_MARKET al daily high (breakout entry).
+    La orden espera a que el precio SUBA hasta limit_price para entrar,
+    evitando el fill inmediato que ocurria con LIMIT BUY cuando el precio
+    estaba por debajo del daily high.
     Retorna order_id o None si DRY_RUN o si fallo sin recuperacion.
     """
     lp = _fmt_price(limit_price)
@@ -213,54 +213,70 @@ def place_limit_buy(limit_price: float, qty: float) -> str | None:
 
     if config.DRY_RUN:
         fake_id = f"DRY-{int(time.time())}"
-        print(f"  [DRY] LIMIT BUY  qty={q}  price={lp}  -> id={fake_id}")
+        print(f"  [DRY] STOP_MARKET BUY  qty={q}  stopPrice={lp}  -> id={fake_id}")
         return fake_id
 
     # Idempotencia previa: si ya existe una orden al mismo precio, reutilizarla
     existing = get_open_limit_buy(limit_price)
     if existing is not None:
         order_id = str(existing["orderId"])
-        print(f"  [ORDER] LIMIT BUY ya existe  price={lp}  id={order_id}  (reutilizado)")
+        print(f"  [ORDER] BUY STOP ya existe  stopPrice={lp}  id={order_id}  (reutilizado)")
         return order_id
 
     try:
         resp = client().futures_create_order(
-            symbol      = SYMBOL,
-            side        = "BUY",
-            type        = "LIMIT",
-            quantity    = q,
-            price       = lp,
-            timeInForce = "GTC",
+            symbol    = SYMBOL,
+            side      = "BUY",
+            type      = "STOP_MARKET",
+            stopPrice = lp,
+            quantity  = q,
         )
         order_id = str(resp["orderId"])
-        print(f"  [ORDER] LIMIT BUY  qty={q}  price={lp}  id={order_id}")
+        print(f"  [ORDER] STOP_MARKET BUY  qty={q}  stopPrice={lp}  id={order_id}")
         return order_id
     except (BinanceAPIException, KeyError) as e:
-        # -1007: timeout — la orden puede haberse creado del lado de Binance
         print(f"  [WARN] place_limit_buy fallo: {e}")
         existing = get_open_limit_buy(limit_price)
         if existing is not None:
             order_id = str(existing["orderId"])
-            print(f"  [ORDER] LIMIT BUY recuperado tras timeout  id={order_id}")
+            print(f"  [ORDER] BUY STOP recuperado tras fallo  id={order_id}")
             return order_id
         print(f"  [WARN] Sin orden abierta confirmada — no se coloco la orden")
         return None
 
 
+def _get_open_sl_algo_order() -> dict | None:
+    """
+    Busca SL en el engine de ordenes algo de Binance.
+    Binance testnet rutea STOP_MARKET con reduceOnly por este engine,
+    devolviendo 'algoId' en vez de 'orderId'.
+    """
+    try:
+        result = client()._request_futures_api("get", "algo/orders/open", signed=True)
+        for o in (result.get("orders") or []):
+            if (o.get("symbol") == SYMBOL
+                    and o.get("side") == "SELL"
+                    and o.get("orderType") in ("STOP_MARKET", "STOP")):
+                return o
+    except Exception as e:
+        print(f"  [WARN] _get_open_sl_algo_order: {e}")
+    return None
+
+
 def get_open_sl_order() -> dict | None:
     """
-    Busca una orden SELL de cierre abierta para SYMBOL (idempotencia).
-    Acepta STOP_MARKET o STOP — Binance Testnet a veces devuelve tipos distintos.
+    Busca SELL STOP activo para SYMBOL.
+    Chequea primero ordenes regulares; si no encuentra, busca en ordenes algo
+    (Binance testnet rutea STOP_MARKET con reduceOnly por ese engine).
     """
     try:
         orders = client().futures_get_open_orders(symbol=SYMBOL)
+        for o in orders:
+            if o.get("side") == "SELL" and o.get("type") in ("STOP_MARKET", "STOP"):
+                return o
     except BinanceAPIException as e:
         print(f"  [WARN] get_open_sl_order: {e}")
-        return None
-    for o in orders:
-        if o.get("side") == "SELL" and o.get("type") in ("STOP_MARKET", "STOP"):
-            return o
-    return None
+    return _get_open_sl_algo_order()
 
 
 def place_sl_order(sl_price: float, qty: float, retries: int = 2) -> str | None:
@@ -297,10 +313,11 @@ def place_sl_order(sl_price: float, qty: float, retries: int = 2) -> str | None:
                 quantity   = q,
                 reduceOnly = "true",
             )
-            print(f"  [DEBUG] SL resp keys: {list(resp.keys()) if isinstance(resp, dict) else type(resp)}")
-            sl_order_id = str(resp.get("orderId") or resp.get("clientOrderId") or "")
+            # Binance testnet devuelve 'algoId' (engine condicional) en vez de 'orderId'
+            # cuando se usa reduceOnly en STOP_MARKET. Aceptamos ambos.
+            sl_order_id = str(resp.get("orderId") or resp.get("algoId") or "")
             if not sl_order_id:
-                raise KeyError(f"orderId ausente en resp: {resp}")
+                raise KeyError(f"orderId/algoId ausente en resp: {resp}")
 
             print(f"  [ORDER] STOP_MARKET SL  stopPrice={sp}  id={sl_order_id}")
             return sl_order_id
