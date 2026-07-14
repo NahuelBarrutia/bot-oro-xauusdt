@@ -194,7 +194,20 @@ def iterate(state: dict, new_h1: bool = True) -> dict:
             state["phase"]          = "open"
             state["sl_order_id"]    = ""
             st.save(state)   # guardar "open" YA, antes de intentar el SL
-            print(f"  [FILL] Orden llenada a {filled_entry:.2f}  sl={state['sl_price']:.2f}")
+
+            # sl_dist real post-fill: el fill puede ser mejor que limit_price,
+            # achicando la distancia al SL. Si queda por debajo del minimo,
+            # ajustar SL a filled_entry - MIN_SL_DIST para evitar -2021.
+            real_sl_dist = filled_entry - state["sl_price"]
+            if real_sl_dist < config.MIN_SL_DIST:
+                adjusted_sl = round(filled_entry - config.MIN_SL_DIST, 2)
+                print(f"  [FILL] sl_dist real={real_sl_dist:.2f} < min={config.MIN_SL_DIST} "
+                      f"— ajustando SL {state['sl_price']:.2f} -> {adjusted_sl:.2f}")
+                state["sl_price"] = adjusted_sl
+                st.save(state)
+
+            print(f"  [FILL] Orden llenada a {filled_entry:.2f}  sl={state['sl_price']:.2f}  "
+                  f"sl_dist={filled_entry - state['sl_price']:.2f}")
 
             # Colocar SL inmediatamente (con retry + deteccion de duplicados)
             sl_order_id = ex.place_sl_order(state["sl_price"], state["entry_qty"])
