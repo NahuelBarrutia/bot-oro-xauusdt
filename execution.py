@@ -284,17 +284,21 @@ def place_sl_order(sl_price: float, qty: float, retries: int = 2) -> str | None:
         return sl_order_id
 
     sp = _fmt_price(sl_price)
+    q  = _fmt_qty(qty)
     last_err: Exception | None = None
 
     for attempt in range(1, retries + 1):
         try:
             resp = client().futures_create_order(
-                symbol        = SYMBOL,
-                side          = "SELL",
-                type          = "STOP_MARKET",
-                stopPrice     = sp,
-                closePosition = "true",
-                # timeInForce omitido: en testnet GTE_GTC puede causar -4130
+                symbol     = SYMBOL,
+                side       = "SELL",
+                type       = "STOP_MARKET",
+                stopPrice  = sp,
+                quantity   = q,
+                reduceOnly = "true",
+                # closePosition="true" omitido: en testnet causa respuesta sin
+                # 'orderId' y la orden no aparece en futures_get_open_orders,
+                # rompiendo la deteccion de duplicados y generando el loop -4130.
             )
             sl_order_id = str(resp["orderId"])
             print(f"  [ORDER] STOP_MARKET SL  stopPrice={sp}  id={sl_order_id}")
