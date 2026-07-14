@@ -131,8 +131,9 @@ def iterate(state: dict, new_h1: bool = True) -> dict:
         pos = ex.get_open_position()
 
         if pos is None:
-            # SL fue tocado — Binance cerro la posicion
-            exit_price = state["sl_price"]
+            # SL fue tocado — intentar obtener precio real de ejecucion para PnL preciso
+            real_price = ex.get_last_trade_price() if not config.DRY_RUN else None
+            exit_price = real_price or state["sl_price"]
             pnl = _compute_pnl(state, exit_price)
             state["daily_pnl"] += pnl
             state["capital"]   += pnl
@@ -156,7 +157,13 @@ def iterate(state: dict, new_h1: bool = True) -> dict:
             ex.close_position_market(state["entry_qty"])
             time.sleep(2)
 
-            exit_price = last_close
+            # Verificar que la posicion realmente cerro antes de registrar
+            if not config.DRY_RUN and ex.get_open_position() is not None:
+                print(f"  [WARN] TIME exit: posicion sigue abierta — reintentando en proximo chequeo")
+                return state
+
+            real_price = ex.get_last_trade_price() if not config.DRY_RUN else None
+            exit_price = real_price or last_close
             pnl = _compute_pnl(state, exit_price)
             state["daily_pnl"] += pnl
             state["capital"]   += pnl
@@ -242,6 +249,25 @@ def iterate(state: dict, new_h1: bool = True) -> dict:
         elif new_h1 and (state["pending_bars"] >= config.PENDING_BARS or status in ("CANCELED", "REJECTED", "EXPIRED")):
             ex.cancel_order(order_id)
             print(f"  [EXPIRE] Orden expirada tras {state['pending_bars']} barras.")
+
+            # Chequear fill parcial: si hay posicion abierta, adoptarla en vez de resetear
+            if not config.DRY_RUN:
+                pos = ex.get_open_position()
+                if pos is not None:
+                    qty = abs(float(pos["positionAmt"]))
+                    print(f"  [WARN] Fill parcial al expirar — adoptando posicion "
+                          f"(qty={qty}  entry={pos['entryPrice']})")
+                    state["phase"]       = "open"
+                    state["entry_price"] = float(pos["entryPrice"])
+                    state["entry_qty"]   = qty
+                    state["bars_held"]   = 0
+                    state["sl_order_id"] = ""
+                    st.save(state)
+                    sl_order_id = ex.place_sl_order(state["sl_price"], qty)
+                    state["sl_order_id"] = sl_order_id or ""
+                    st.save(state)
+                    return state
+
             state = st.reset_to_idle(state)
             st.save(state)
 
@@ -385,7 +411,12 @@ def main() -> None:
         return
 
     print(f"\nEntrando al loop (poll cada {config.POLL_INTERVAL}s). Ctrl+C para detener.\n")
-    last_h1_time: int = 0
+    # Inicializar con la H1 actual para que el primer poll no cuente como vela nueva
+    try:
+        _init = ex.get_h1_candles(limit=2)
+        last_h1_time: int = _init[-1]["time"] if _init else 0
+    except Exception:
+        last_h1_time: int = 0
 
     while True:
         try:

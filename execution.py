@@ -397,6 +397,18 @@ def get_filled_entry(order_id: str) -> float | None:
         return None
 
 
+def get_last_trade_price() -> float | None:
+    """Precio del fill mas reciente en SYMBOL. Usado para capturar slippage en SL/TIME exit."""
+    try:
+        trades = client().futures_account_trades(symbol=SYMBOL, limit=1)
+        if trades:
+            return float(trades[-1]["price"])
+        return None
+    except BinanceAPIException as e:
+        print(f"  [WARN] get_last_trade_price: {e}")
+        return None
+
+
 def close_position_market(qty: float) -> bool:
     """Cierra la posicion con orden MARKET reduceOnly."""
     q = _fmt_qty(qty)
